@@ -54,7 +54,5 @@ using Python and open-source libraries.
 7. Rule-based and ML-assisted classification is performed
 8. Results are visualized using plots and image overlays
 
----
 
-## 📂 Project Structure
 
