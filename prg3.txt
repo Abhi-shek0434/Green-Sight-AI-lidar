@@ -1,0 +1,567 @@
+# Install required packages
+!pip install opencv-python matplotlib Pillow scikit-image scikit-learn
+
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+import os
+from google.colab import files
+from google.colab.patches import cv2_imshow
+import io
+import IPython.display as display
+from skimage import feature, filters, measure, segmentation
+from sklearn.cluster import KMeans
+import warnings
+warnings.filterwarnings('ignore')
+
+print("✅ Advanced Crop Type Classifier for Google Colab")
+print("=" * 60)
+
+def extract_crop_features(image_path, mask):
+    """
+    Extract advanced features for crop type classification
+    """
+    original_image = cv2.imread(image_path)
+    original_image_rgb = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
+
+    # Apply mask to get only vegetation areas
+    crop_area = cv2.bitwise_and(original_image_rgb, original_image_rgb, mask=mask)
+
+    # Convert to different color spaces
+    hsv = cv2.cvtColor(crop_area, cv2.COLOR_RGB2HSV)
+    lab = cv2.cvtColor(crop_area, cv2.COLOR_RGB2LAB)
+    ycrbr = cv2.cvtColor(crop_area, cv2.COLOR_RGB2YCrCb)
+
+    features = {}
+
+    # RGB statistics
+    for i, channel in enumerate(['Red', 'Green', 'Blue']):
+        channel_data = crop_area[:, :, i]
+        channel_data = channel_data[channel_data > 0]  # Only vegetation pixels
+        if len(channel_data) > 0:
+            features[f'{channel}_mean'] = np.mean(channel_data)
+            features[f'{channel}_std'] = np.std(channel_data)
+            features[f'{channel}_range'] = np.ptp(channel_data)
+
+    # HSV statistics (important for vegetation)
+    hue_channel = hsv[:, :, 0]
+    hue_channel = hue_channel[hue_channel > 0]
+    if len(hue_channel) > 0:
+        features['Hue_mean'] = np.mean(hue_channel)
+        features['Hue_std'] = np.std(hue_channel)
+        features['Saturation_mean'] = np.mean(hsv[:, :, 1][hsv[:, :, 1] > 0])
+        features['Value_mean'] = np.mean(hsv[:, :, 2][hsv[:, :, 2] > 0])
+
+    # LAB color space (perceptual uniformity)
+    features['L_mean'] = np.mean(lab[:, :, 0][lab[:, :, 0] > 0])
+    features['A_mean'] = np.mean(lab[:, :, 1][lab[:, :, 1] > 0])  # Green-Red
+    features['B_mean'] = np.mean(lab[:, :, 2][lab[:, :, 2] > 0])  # Blue-Yellow
+
+    # Texture features
+    gray_crop = cv2.cvtColor(crop_area, cv2.COLOR_RGB2GRAY)
+    gray_crop = gray_crop[gray_crop > 0]
+
+    if len(gray_crop) > 0:
+        try:
+            # GLCM texture features
+            glcm = feature.graycomatrix(gray_crop.astype(np.uint8), [1], [0], symmetric=True, normed=True)
+            features['Contrast'] = feature.graycoprops(glcm, 'contrast')[0, 0]
+            features['Homogeneity'] = feature.graycoprops(glcm, 'homogeneity')[0, 0]
+            features['Energy'] = feature.graycoprops(glcm, 'energy')[0, 0]
+            features['Correlation'] = feature.graycoprops(glcm, 'correlation')[0, 0]
+
+            # Edge density
+            edges = filters.sobel(gray_crop.astype(float))
+            features['Edge_density'] = np.mean(edges)
+        except:
+            features.update({'Contrast': 0, 'Homogeneity': 0, 'Energy': 0, 'Correlation': 0, 'Edge_density': 0})
+
+    # Plant structure features
+    features['Density'] = np.count_nonzero(mask) / (mask.shape[0] * mask.shape[1])
+
+    # Color diversity
+    dominant_colors = extract_dominant_colors(crop_area)
+    features['Color_variety'] = len(dominant_colors)
+
+    # Leaf pattern analysis (simplified)
+    features['Green_red_ratio'] = features.get('Green_mean', 1) / (features.get('Red_mean', 1) + 0.001)
+    features['Green_blue_ratio'] = features.get('Green_mean', 1) / (features.get('Blue_mean', 1) + 0.001)
+
+    # Plant health indicators
+    features['Vibrance'] = features.get('Saturation_mean', 0) * features.get('Value_mean', 0) / 100
+
+    return features
+
+def extract_dominant_colors(image, n_colors=5):
+    """Extract dominant colors using K-means clustering"""
+    pixels = image.reshape(-1, 3)
+    pixels = pixels[np.any(pixels > 10, axis=1)]  # Remove dark pixels
+
+    if len(pixels) > n_colors:
+        kmeans = KMeans(n_clusters=n_colors, random_state=42, n_init=10)
+        kmeans.fit(pixels)
+        return kmeans.cluster_centers_
+    return []
+
+def classify_crop_type(features, coverage_percentage):
+    """
+    Classify crop type based on extracted features
+    """
+    scores = {
+        # Cereals
+        'Rice (Oryza sativa)': 0,
+        'Ragi (Finger Millet)': 0,
+        'Wheat': 0,
+        'Maize (Corn)': 0,
+
+        # Commercial crops
+        'Nicotiana tabacum (Tobacco)': 0,
+        'Sugarcane': 0,
+        'Cotton': 0,
+
+        # Special crops
+        'Cannabis sativa/indica': 0,
+
+        # Vegetables
+        'Potato': 0,
+        'Tomato': 0,
+
+        # Legumes
+        'Soybean': 0,
+        'Groundnut (Peanut)': 0,
+
+        # Plantation
+        'Tea': 0,
+        'Coffee': 0
+    }
+
+    # Extract key features
+    green_ratio = features.get('Green_red_ratio', 0)
+    saturation = features.get('Saturation_mean', 0)
+    value = features.get('Value_mean', 0)
+    color_variety = features.get('Color_variety', 0)
+    density = features.get('Density', 0)
+    texture_complexity = features.get('Contrast', 0) + features.get('Homogeneity', 0)
+    a_channel = features.get('A_mean', 0)  # Green-Red balance
+    vibrance = features.get('Vibrance', 0)
+
+    # 🌾 RICE Classification
+    if 30 <= saturation <= 70 and 60 <= value <= 90:  # Often in water, specific green
+        scores['Rice (Oryza sativa)'] += 3
+    if 0.6 <= density <= 0.9 and texture_complexity < 0.3:  # Dense, uniform
+        scores['Rice (Oryza sativa)'] += 2
+    if a_channel < 0:  # Green dominant
+        scores['Rice (Oryza sativa)'] += 1
+
+    # 🌾 RAGI (Finger Millet) Classification
+    if green_ratio > 1.5 and saturation > 60:  # Very green, high saturation
+        scores['Ragi (Finger Millet)'] += 3
+    if density > 0.7 and color_variety <= 3:  # Dense, uniform color
+        scores['Ragi (Finger Millet)'] += 2
+    if texture_complexity > 0.4:  # Finger-like texture
+        scores['Ragi (Finger Millet)'] += 1
+
+    # 🚬 TOBACCO Classification
+    if 80 <= saturation <= 120 and value > 100:  # Large, broad leaves, specific green
+        scores['Nicotiana tabacum (Tobacco)'] += 3
+    if green_ratio > 1.2 and color_variety <= 2:  # Uniform large leaves
+        scores['Nicotiana tabacum (Tobacco)'] += 2
+    if density > 0.6 and texture_complexity < 0.25:  # Regular planting pattern
+        scores['Nicotiana tabacum (Tobacco)'] += 1
+
+    # 🌿 CANNABIS Classification
+    if saturation > 80 and vibrance > 60:  # Very vibrant green
+        scores['Cannabis sativa/indica'] += 3
+    if green_ratio > 2.0 and color_variety >= 3:  # Very green, some color variation
+        scores['Cannabis sativa/indica'] += 2
+    if texture_complexity > 0.5:  # Complex leaf patterns
+        scores['Cannabis sativa/indica'] += 2
+    if 0.5 <= density <= 0.8:  # Medium density
+        scores['Cannabis sativa/indica'] += 1
+
+    # 🌽 MAIZE Classification
+    if green_ratio > 1.3 and saturation > 70:  # Bright green
+        scores['Maize (Corn)'] += 2
+    if density > 0.6 and texture_complexity > 0.3:  # Tall plants, complex texture
+        scores['Maize (Corn)'] += 2
+
+    # 🌾 WHEAT Classification
+    if green_ratio > 1.0 and saturation < 60:  # Less saturated green
+        scores['Wheat'] += 2
+    if density > 0.8 and texture_complexity < 0.4:  # Very dense, uniform
+        scores['Wheat'] += 2
+
+    # 🎋 SUGARCANE Classification
+    if green_ratio > 1.4 and value > 100:  # Very green, bright
+        scores['Sugarcane'] += 2
+    if density > 0.7 and color_variety <= 2:  # Dense, uniform
+        scores['Sugarcane'] += 2
+
+    # 🌿 COTTON Classification
+    if green_ratio > 1.1 and saturation > 65:  # Medium green
+        scores['Cotton'] += 2
+    if 0.4 <= density <= 0.7:  # Medium density
+        scores['Cotton'] += 1
+
+    # 🥔 POTATO Classification
+    if green_ratio > 1.2 and saturation > 70:  # Healthy green
+        scores['Potato'] += 2
+    if density > 0.6 and texture_complexity < 0.3:  # Bushy, uniform
+        scores['Potato'] += 1
+
+    # 🍅 TOMATO Classification
+    if color_variety >= 3:  # Often has flowers/fruits
+        scores['Tomato'] += 2
+    if green_ratio > 1.1 and saturation > 75:
+        scores['Tomato'] += 1
+
+    # 🌱 SOYBEAN Classification
+    if green_ratio > 1.3 and density > 0.7:
+        scores['Soybean'] += 2
+
+    # 🥜 GROUNDNUT Classification
+    if green_ratio > 1.2 and density < 0.6:  # Spreading growth
+        scores['Groundnut (Peanut)'] += 2
+
+    # 🍵 TEA Classification
+    if green_ratio > 1.6 and saturation > 80:  # Very green, high saturation
+        scores['Tea'] += 3
+    if density > 0.8 and texture_complexity < 0.2:  # Very dense, uniform
+        scores['Tea'] += 2
+
+    # ☕ COFFEE Classification
+    if green_ratio > 1.4 and 70 <= saturation <= 90:
+        scores['Coffee'] += 2
+    if 0.5 <= density <= 0.8:  # Shaded growth
+        scores['Coffee'] += 1
+
+    # Adjust scores based on coverage percentage
+    high_density_crops = ['Rice (Oryza sativa)', 'Ragi (Finger Millet)', 'Wheat', 'Tea']
+    medium_density_crops = ['Maize (Corn)', 'Sugarcane', 'Soybean', 'Coffee']
+
+    for crop in high_density_crops:
+        if coverage_percentage > 70:
+            scores[crop] += 2
+
+    for crop in medium_density_crops:
+        if 40 <= coverage_percentage <= 70:
+            scores[crop] += 1
+
+    # Get the best match
+    best_type = max(scores.items(), key=lambda x: x[1])
+
+    # Confidence calculation
+    total_score = sum(scores.values())
+    confidence = (best_type[1] / total_score * 100) if total_score > 0 else 0
+
+    return best_type[0], confidence, scores
+
+def analyze_crop_coverage(image_path):
+    """
+    Enhanced crop analysis with type classification
+    """
+    try:
+        # Load the image
+        original_image = cv2.imread(image_path)
+
+        if original_image is None:
+            print(f"Error: Could not load image from {image_path}")
+            return None, None, None, None, None, None, None
+
+        # Enhanced green detection for different crops
+        hsv = cv2.cvtColor(original_image, cv2.COLOR_BGR2HSV)
+
+        # Multiple green ranges for different crop types
+        # Standard green range
+        lower_green1 = np.array([25, 40, 40])
+        upper_green1 = np.array([95, 255, 255])
+
+        # Bright green range (for vibrant crops like cannabis)
+        lower_green2 = np.array([30, 80, 60])
+        upper_green2 = np.array([90, 255, 200])
+
+        # Create combined mask
+        mask1 = cv2.inRange(hsv, lower_green1, upper_green1)
+        mask2 = cv2.inRange(hsv, lower_green2, upper_green2)
+        mask = cv2.bitwise_or(mask1, mask2)
+
+        # Clean up the mask
+        kernel = np.ones((5,5), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+        # Calculate coverage percentage
+        total_pixels = mask.shape[0] * mask.shape[1]
+        crop_pixels = np.count_nonzero(mask)
+        crop_percentage = (crop_pixels / total_pixels) * 100
+
+        # Extract features for classification
+        features = extract_crop_features(image_path, mask)
+
+        # Classify crop type
+        crop_type, confidence, type_scores = classify_crop_type(features, crop_percentage)
+
+        # Create processed image with color coding based on crop type
+        processed_image = original_image.copy()
+
+        # Different colors for different crop categories
+        crop_colors = {
+            'Cannabis sativa/indica': [0, 255, 0],      # Bright green
+            'Nicotiana tabacum (Tobacco)': [0, 200, 0], # Medium green
+            'Ragi (Finger Millet)': [100, 255, 100],    # Light green
+            'Rice (Oryza sativa)': [0, 150, 0],         # Dark green
+            'Tea': [50, 255, 50],                       # Tea green
+            'default': [0, 255, 0]                      # Default green
+        }
+
+        overlay_color = crop_colors.get(crop_type, crop_colors['default'])
+        green_overlay = np.zeros_like(original_image)
+        green_overlay[:] = overlay_color
+
+        for i in range(3):
+            processed_image[:,:,i] = np.where(mask > 0,
+                                            original_image[:,:,i] * 0.7 + green_overlay[:,:,i] * 0.3,
+                                            original_image[:,:,i])
+
+        return processed_image, crop_percentage, mask, crop_type, confidence, features, type_scores
+
+    except Exception as e:
+        print(f"An error occurred during analysis: {str(e)}")
+        return None, None, None, None, None, None, None
+
+def display_crop_analysis_results(original_image_path, processed_image, percentage, mask,
+                                crop_type, confidence, features, type_scores):
+    """Display comprehensive crop analysis results"""
+
+    original_image = cv2.imread(original_image_path)
+    original_image_rgb = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
+    processed_image_rgb = cv2.cvtColor(processed_image, cv2.COLOR_BGR2RGB)
+
+    # Create comprehensive visualization
+    fig = plt.figure(figsize=(22, 14))
+
+    # 1. Original Image
+    plt.subplot(2, 4, 1)
+    plt.imshow(original_image_rgb)
+    plt.title('Original Image', fontsize=11, fontweight='bold')
+    plt.axis('off')
+
+    # 2. Processed Image
+    plt.subplot(2, 4, 2)
+    plt.imshow(processed_image_rgb)
+    plt.title(f'Crop Detection\n({crop_type})', fontsize=11, fontweight='bold')
+    plt.axis('off')
+
+    # 3. Crop Mask
+    plt.subplot(2, 4, 3)
+    plt.imshow(mask, cmap='Greens')
+    plt.title('Crop Mask (White = Vegetation)', fontsize=11, fontweight='bold')
+    plt.axis('off')
+
+    # 4. Coverage Pie Chart
+    plt.subplot(2, 4, 4)
+    labels = ['Crop Area', 'Non-Crop Area']
+    sizes = [percentage, 100 - percentage]
+    colors = ['#2e8b57', '#ff6b6b']
+    plt.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=90)
+    plt.title('Crop Coverage', fontsize=11, fontweight='bold')
+
+    # 5. Crop Type Classification Scores
+    plt.subplot(2, 4, 5)
+    crop_types = list(type_scores.keys())
+    scores = list(type_scores.values())
+
+    # Create horizontal bar chart
+    y_pos = np.arange(len(crop_types))
+    colors = ['lightgray' if score < max(scores) else '#2e8b57' for score in scores]
+
+    plt.barh(y_pos, scores, color=colors, alpha=0.7)
+    plt.yticks(y_pos, crop_types, fontsize=8)
+    plt.xlabel('Classification Score')
+    plt.title('Crop Type Classification', fontsize=11, fontweight='bold')
+    plt.tight_layout()
+
+    # 6. Key Features Radar Chart (simplified)
+    plt.subplot(2, 4, 6)
+    feature_names = ['Green Ratio', 'Saturation', 'Density', 'Complexity', 'Color Variety']
+    feature_values = [
+        min(features.get('Green_red_ratio', 0), 2.0),
+        features.get('Saturation_mean', 0) / 2.55,
+        features.get('Density', 0) * 100,
+        min(features.get('Contrast', 0) * 10, 100),
+        min(features.get('Color_variety', 0) * 20, 100)
+    ]
+
+    plt.bar(feature_names, feature_values, color=['green', 'blue', 'orange', 'red', 'purple'], alpha=0.7)
+    plt.title('Key Features', fontsize=11, fontweight='bold')
+    plt.xticks(rotation=45)
+
+    # 7. Color Analysis
+    plt.subplot(2, 4, 7)
+    color_channels = ['Red', 'Green', 'Blue']
+    color_values = [features.get(f'{channel}_mean', 0) for channel in color_channels]
+    plt.bar(color_channels, color_values, color=['red', 'green', 'blue'], alpha=0.7)
+    plt.title('Color Channel Means', fontsize=11, fontweight='bold')
+    plt.ylabel('Intensity (0-255)')
+
+    # 8. Detailed Information
+    plt.subplot(2, 4, 8)
+    plt.axis('off')
+
+    info_text = f"""
+    CROP ANALYSIS RESULTS
+    ====================
+    Identified Crop: {crop_type}
+    Confidence: {confidence:.1f}%
+    Coverage: {percentage:.1f}%
+
+    KEY FEATURES:
+    • Green Ratio: {features.get('Green_red_ratio', 0):.2f}
+    • Saturation: {features.get('Saturation_mean', 0):.1f}
+    • Density: {features.get('Density', 0)*100:.1f}%
+    • Color Variety: {features.get('Color_variety', 0)}
+    • Texture Complexity: {features.get('Contrast', 0) + features.get('Homogeneity', 0):.3f}
+
+    IMAGE DETAILS:
+    • Size: {original_image.shape[1]} x {original_image.shape[0]}
+    • Crop Pixels: {np.count_nonzero(mask):,}
+    """
+
+    plt.text(0.1, 0.9, info_text, fontsize=9, fontfamily='monospace',
+            verticalalignment='top', bbox=dict(boxstyle="round", facecolor="lightgray", alpha=0.7))
+
+    plt.tight_layout()
+    plt.show()
+
+    # Print detailed results
+    print("\n" + "="*80)
+    print("🌱 CROP TYPE CLASSIFICATION RESULTS")
+    print("="*80)
+    print(f"🌾 Identified Crop: {crop_type}")
+    print(f"✅ Confidence Level: {confidence:.1f}%")
+    print(f"📊 Crop Coverage: {percentage:.2f}%")
+
+    print("\n🔍 Feature Analysis:")
+    print(f"   • Green-Red Ratio: {features.get('Green_red_ratio', 0):.2f}")
+    print(f"   • Saturation: {features.get('Saturation_mean', 0):.1f}")
+    print(f"   • Value (Brightness): {features.get('Value_mean', 0):.1f}")
+    print(f"   • Color Variety: {features.get('Color_variety', 0)} dominant colors")
+    print(f"   • Crop Density: {features.get('Density', 0)*100:.1f}%")
+    print(f"   • Texture Complexity: {features.get('Contrast', 0) + features.get('Homogeneity', 0):.3f}")
+
+    print("\n📈 Top Classification Scores:")
+    top_scores = sorted(type_scores.items(), key=lambda x: x[1], reverse=True)[:5]
+    for i, (crop, score) in enumerate(top_scores, 1):
+        indicator = "🎯" if crop == crop_type else "  "
+        print(f"   {i}. {indicator} {crop}: {score:.1f}")
+
+    print("="*80)
+
+def analyze_single_crop_image():
+    """Analyze a single uploaded image with crop type classification"""
+    print("📁 Please upload your agricultural image(s):")
+    uploaded = files.upload()
+
+    if not uploaded:
+        print("❌ No images uploaded!")
+        return
+
+    for filename in uploaded.keys():
+        print(f"\n🔍 Analyzing: {filename}")
+
+        result = analyze_crop_coverage(filename)
+        processed_image, percentage, mask, crop_type, confidence, features, type_scores = result
+
+        if all(x is not None for x in [processed_image, percentage, mask, crop_type]):
+            display_crop_analysis_results(filename, processed_image, percentage, mask,
+                                       crop_type, confidence, features, type_scores)
+
+            # Save results
+            output_filename = f"crop_analysis_{filename}"
+            cv2.imwrite(output_filename, processed_image)
+            print(f"💾 Results saved as: {output_filename}")
+        else:
+            print(f"❌ Failed to analyze {filename}")
+
+def show_crop_characteristics_guide():
+    """Display guide to crop type characteristics"""
+    print("\n" + "="*80)
+    print("🌿 CROP TYPE CHARACTERISTICS GUIDE")
+    print("="*80)
+
+    guide = {
+        'Cannabis sativa/indica': {
+            'color': 'Vibrant bright green, high saturation',
+            'texture': 'Complex leaf patterns, serrated edges',
+            'density': 'Medium to high density',
+            'features': 'Distinct leaf shape, often grown in controlled environments'
+        },
+        'Nicotiana tabacum (Tobacco)': {
+            'color': 'Large broad leaves, specific green hue',
+            'texture': 'Smooth large leaves, uniform appearance',
+            'density': 'Regular spacing, medium density',
+            'features': 'Broad leaves, often grown in rows'
+        },
+        'Ragi (Finger Millet)': {
+            'color': 'Bright green, high chlorophyll content',
+            'texture': 'Grass-like, finger-shaped clusters',
+            'density': 'Very dense planting',
+            'features': 'Small grain cereal, drought-resistant'
+        },
+        'Rice (Oryza sativa)': {
+            'color': 'Specific green often with water reflection',
+            'texture': 'Uniform, often in waterlogged conditions',
+            'density': 'Very high density',
+            'features': 'Paddy field appearance, water presence'
+        },
+        'Wheat': {
+            'color': 'Golden-green, especially when mature',
+            'texture': 'Grass-like, uniform fields',
+            'density': 'Extremely dense',
+            'features': 'Large monoculture fields'
+        },
+        'Maize (Corn)': {
+            'color': 'Bright green, tall plants',
+            'texture': 'Large leaves, visible rows',
+            'density': 'Medium density, spaced planting',
+            'features': 'Tall plants, visible tassels when mature'
+        },
+        'Tea': {
+            'color': 'Very green, high saturation',
+            'texture': 'Very uniform, manicured appearance',
+            'density': 'Extremely dense, bush-like',
+            'features': 'Often on slopes, uniform canopy'
+        }
+    }
+
+    for crop, characteristics in guide.items():
+        print(f"\n🌱 {crop}:")
+        for char, desc in characteristics.items():
+            print(f"   • {char.capitalize()}: {desc}")
+
+def main():
+    """Main function with crop classification menu"""
+    while True:
+        print("\n" + "="*50)
+        print("🌾 ADVANCED CROP TYPE CLASSIFIER")
+        print("="*50)
+        print("1. 📷 Analyze Crop Image (Type Classification)")
+        print("2. 🌿 View Crop Characteristics Guide")
+        print("3. 🚪 Exit")
+
+        choice = input("\nEnter your choice (1-3): ").strip()
+
+        if choice == '1':
+            analyze_single_crop_image()
+        elif choice == '2':
+            show_crop_characteristics_guide()
+        elif choice == '3':
+            print("👋 Thank you for using Advanced Crop Type Classifier!")
+            break
+        else:
+            print("❌ Invalid choice! Please try again.")
+
+# Run the application
+if __name__ == "__main__":
+    main()

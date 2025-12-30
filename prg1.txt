@@ -1,0 +1,320 @@
+# Install required packages
+!pip install opencv-python matplotlib Pillow
+
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+import os
+from google.colab import files
+from google.colab.patches import cv2_imshow
+import io
+import IPython.display as display
+
+print("✅ Forest Coverage Analyzer for Google Colab")
+print("=" * 50)
+
+def analyze_forest_coverage(image_path):
+    """
+    Analyzes the forest coverage of an image.
+
+    Args:
+        image_path (str): The path to the image file.
+
+    Returns:
+        tuple: A tuple containing the processed image, forest coverage percentage, and mask
+    """
+    try:
+        # Load the image
+        original_image = cv2.imread(image_path)
+
+        if original_image is None:
+            print(f"Error: Could not load image from {image_path}")
+            return None, None, None
+
+        # Convert to HSV color space for better color segmentation
+        hsv = cv2.cvtColor(original_image, cv2.COLOR_BGR2HSV)
+
+        # Define range for green colors (forest/vegetation)
+        lower_green = np.array([25, 40, 40])
+        upper_green = np.array([95, 255, 255])
+
+        # Create mask for green areas
+        mask = cv2.inRange(hsv, lower_green, upper_green)
+
+        # Apply morphological operations to clean up the mask
+        kernel = np.ones((5,5), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+        # Calculate percentage of forest coverage
+        total_pixels = mask.shape[0] * mask.shape[1]
+        forest_pixels = np.count_nonzero(mask)
+        forest_percentage = (forest_pixels / total_pixels) * 100
+
+        # Create the processed image with green overlay for forest areas
+        processed_image = original_image.copy()
+        green_overlay = np.zeros_like(original_image)
+        green_overlay[:] = [0, 255, 0]  # Green color
+
+        # Apply green overlay to forest areas
+        for i in range(3):  # Apply to all channels
+            processed_image[:,:,i] = np.where(mask > 0,
+                                            original_image[:,:,i] * 0.7 + green_overlay[:,:,i] * 0.3,
+                                            original_image[:,:,i])
+
+        return processed_image, forest_percentage, mask
+
+    except Exception as e:
+        print(f"An error occurred during analysis: {str(e)}")
+        return None, None, None
+
+def upload_image():
+    """Upload image files to Colab"""
+    print("📁 Please upload your forest image(s):")
+    uploaded = files.upload()
+
+    image_paths = []
+    for filename in uploaded.keys():
+        print(f"✅ Uploaded: {filename}")
+        image_paths.append(filename)
+
+    return image_paths
+
+def display_analysis_results(original_image_path, processed_image, percentage, mask):
+    """Display comprehensive analysis results"""
+
+    # Load original image for display
+    original_image = cv2.imread(original_image_path)
+    original_image_rgb = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
+    processed_image_rgb = cv2.cvtColor(processed_image, cv2.COLOR_BGR2RGB)
+
+    # Create a comprehensive visualization
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+
+    # 1. Original Image
+    ax1.imshow(original_image_rgb)
+    ax1.set_title('Original Image', fontsize=14, fontweight='bold')
+    ax1.axis('off')
+
+    # 2. Processed Image (Forest Detection)
+    ax2.imshow(processed_image_rgb)
+    ax2.set_title('Forest Detection (Green = Forest Areas)', fontsize=14, fontweight='bold')
+    ax2.axis('off')
+
+    # 3. Forest Mask
+    ax3.imshow(mask, cmap='Greens')
+    ax3.set_title('Forest Mask (White = Forest)', fontsize=14, fontweight='bold')
+    ax3.axis('off')
+
+    # 4. Pie Chart
+    labels = ['Forest Coverage', 'Non-Forest Area']
+    sizes = [percentage, 100 - percentage]
+    colors = ['#2e8b57', '#ff6b6b']
+    explode = (0.1, 0)  # explode the forest slice
+
+    wedges, texts, autotexts = ax4.pie(sizes, explode=explode, labels=labels, colors=colors,
+                                      autopct='%1.2f%%', shadow=True, startangle=90,
+                                      textprops={'fontsize': 12})
+
+    # Style the percentage text
+    for autotext in autotexts:
+        autotext.set_color('white')
+        autotext.set_fontweight('bold')
+        autotext.set_fontsize(11)
+
+    ax4.set_title('Forest Coverage Analysis', fontsize=16, fontweight='bold', pad=20)
+
+    # Add summary text
+    summary_text = f"""
+    Analysis Summary:
+    • Forest Coverage: {percentage:.2f}%
+    • Non-Forest Area: {100 - percentage:.2f}%
+    • Image Size: {original_image.shape[1]} x {original_image.shape[0]} pixels
+    • Total Pixels: {original_image.shape[0] * original_image.shape[1]:,}
+    • Forest Pixels: {np.count_nonzero(mask):,}
+    """
+
+    plt.figtext(0.5, 0.01, summary_text, ha='center', fontsize=12,
+                bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray", alpha=0.7))
+
+    plt.tight_layout()
+    plt.subplots_adjust(bottom=0.15)
+    plt.show()
+
+    # Print detailed results
+    print("\n" + "="*60)
+    print("📊 FOREST COVERAGE ANALYSIS RESULTS")
+    print("="*60)
+    print(f"🌳 Forest Coverage: {percentage:.2f}%")
+    print(f"🏞️  Non-Forest Area: {100 - percentage:.2f}%")
+    print(f"📐 Image Dimensions: {original_image.shape[1]} x {original_image.shape[0]} pixels")
+    print(f"🔢 Total Pixels: {original_image.shape[0] * original_image.shape[1]:,}")
+    print(f"🌲 Forest Pixels: {np.count_nonzero(mask):,}")
+    print(f"🚫 Non-Forest Pixels: {original_image.shape[0] * original_image.shape[1] - np.count_nonzero(mask):,}")
+    print("="*60)
+
+def analyze_single_image():
+    """Analyze a single uploaded image"""
+    image_paths = upload_image()
+
+    if not image_paths:
+        print("❌ No images uploaded!")
+        return
+
+    for image_path in image_paths:
+        print(f"\n🔍 Analyzing: {image_path}")
+
+        processed_image, percentage, mask = analyze_forest_coverage(image_path)
+
+        if processed_image is not None and percentage is not None:
+            display_analysis_results(image_path, processed_image, percentage, mask)
+
+            # Save results
+            output_filename = f"analyzed_{image_path}"
+            cv2.imwrite(output_filename, processed_image)
+            print(f"💾 Results saved as: {output_filename}")
+        else:
+            print(f"❌ Failed to analyze {image_path}")
+
+def analyze_multiple_images():
+    """Analyze multiple images and show comparative results"""
+    image_paths = upload_image()
+
+    if not image_paths:
+        print("❌ No images uploaded!")
+        return
+
+    results = []
+
+    print("\n" + "="*60)
+    print("📊 BATCH ANALYSIS STARTED")
+    print("="*60)
+
+    for image_path in image_paths:
+        print(f"\n🔍 Analyzing: {image_path}")
+
+        processed_image, percentage, mask = analyze_forest_coverage(image_path)
+
+        if processed_image is not None and percentage is not None:
+            results.append({
+                'filename': image_path,
+                'percentage': percentage,
+                'processed_image': processed_image,
+                'mask': mask
+            })
+            print(f"✅ Analysis complete: {percentage:.2f}% forest coverage")
+        else:
+            print(f"❌ Failed to analyze: {image_path}")
+
+    # Display comparative results
+    if results:
+        print("\n" + "="*60)
+        print("📈 COMPARATIVE ANALYSIS RESULTS")
+        print("="*60)
+
+        # Create comparative bar chart
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+        # Bar chart
+        filenames = [r['filename'] for r in results]
+        percentages = [r['percentage'] for r in results]
+
+        bars = ax1.bar(filenames, percentages, color=['#2e8b57' if p > 50 else '#ff6b6b' for p in percentages])
+        ax1.set_title('Forest Coverage Comparison', fontsize=14, fontweight='bold')
+        ax1.set_ylabel('Forest Coverage (%)')
+        ax1.tick_params(axis='x', rotation=45)
+
+        # Add value labels on bars
+        for bar, percentage in zip(bars, percentages):
+            height = bar.get_height()
+            ax1.text(bar.get_x() + bar.get_width()/2., height + 1,
+                    f'{percentage:.1f}%', ha='center', va='bottom', fontweight='bold')
+
+        # Summary pie chart
+        avg_coverage = np.mean(percentages)
+        labels = ['Average Forest', 'Average Non-Forest']
+        sizes = [avg_coverage, 100 - avg_coverage]
+        colors = ['#2e8b57', '#ff6b6b']
+
+        ax2.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=90)
+        ax2.set_title(f'Average Coverage: {avg_coverage:.2f}%', fontsize=14, fontweight='bold')
+
+        plt.tight_layout()
+        plt.show()
+
+        # Print summary table
+        print("\n📋 Summary Table:")
+        print("-" * 50)
+        print(f"{'Image':<20} {'Forest Coverage':<15} {'Status':<10}")
+        print("-" * 50)
+        for result in results:
+            status = "🌳 High" if result['percentage'] > 50 else "🏞️ Low"
+            print(f"{result['filename']:<20} {result['percentage']:<15.2f}% {status:<10}")
+        print("-" * 50)
+        print(f"📊 Average Coverage: {avg_coverage:.2f}%")
+        print(f"📈 Highest Coverage: {max(percentages):.2f}%")
+        print(f"📉 Lowest Coverage: {min(percentages):.2f}%")
+
+def main():
+    """Main function with interactive menu"""
+    while True:
+        print("\n" + "="*50)
+        print("🌳 FOREST COVERAGE ANALYZER - GOOGLE COLAB")
+        print("="*50)
+        print("1. 📷 Analyze Single Image")
+        print("2. 📊 Analyze Multiple Images (Comparative)")
+        print("3. ℹ️  Instructions")
+        print("4. 🚪 Exit")
+
+        choice = input("\nEnter your choice (1-4): ").strip()
+
+        if choice == '1':
+            analyze_single_image()
+        elif choice == '2':
+            analyze_multiple_images()
+        elif choice == '3':
+            show_instructions()
+        elif choice == '4':
+            print("👋 Thank you for using Forest Coverage Analyzer!")
+            break
+        else:
+            print("❌ Invalid choice! Please try again.")
+
+def show_instructions():
+    """Display instructions for users"""
+    print("\n" + "="*60)
+    print("📖 INSTRUCTIONS")
+    print("="*60)
+    print("""
+1. 🖼️  Image Requirements:
+   - Supported formats: JPG, JPEG, PNG, etc.
+   - Clear images with visible vegetation work best
+   - Avoid blurry or dark images
+
+2. 🎯 How it works:
+   - The algorithm detects green areas (forest/vegetation)
+   - Uses HSV color space for better color segmentation
+   - Applies morphological operations to clean detection
+
+3. 📊 Results include:
+   - Original image vs Processed image
+   - Forest mask visualization
+   - Percentage analysis with pie chart
+   - Detailed statistics
+
+4. 💡 Tips for better accuracy:
+   - Use daylight images for better color detection
+   - Ensure good contrast between vegetation and other areas
+   - For aerial/satellite images, adjust the green color range if needed
+
+5. ⚙️  Color Range (adjust if needed):
+   - Lower Green: [25, 40, 40] (Hue, Saturation, Value)
+   - Upper Green: [95, 255, 255]
+
+Note: You can modify the color range in the code for different vegetation types.
+    """)
+
+# Run the application
+if __name__ == "__main__":
+    main()
